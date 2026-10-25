@@ -73,7 +73,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
       }
     });
 
-    // Trajtimi i gabimeve të transmetimit (që të mos ngecë në 0 nëse lidhja vonon)
+    // Trajtimi i gabimeve të transmetimit
     _audioPlayer.playbackEventStream.listen((event) {}, onError: (Object e, StackTrace stackTrace) {
       setState(() {
         _isLoading = false;
@@ -109,13 +109,18 @@ class _MusicHomePageState extends State<MusicHomePage> {
     });
 
     try {
-      // Marrim manifestin e audios nga YouTube
       var manifest = await _yt.videos.streamsClient.getManifest(video.id);
       var audioStream = manifest.audioOnly.withHighestBitrate();
       var streamUrl = audioStream.url.toString();
 
-      // Vendosim URL-së dhe e luajmë
-      await _audioPlayer.setUrl(streamUrl);
+      // Kalojmë User-Agent për të shmangur bllokimin nga YouTube
+      await _audioPlayer.setUrl(
+        streamUrl,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+      );
+      
       await _audioPlayer.play();
 
       setState(() {
@@ -125,16 +130,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
       setState(() {
         _isLoading = false;
       });
-      // Në rast se dështon për shkak të linkut të skaduar, provojmë edhe një herë
-      try {
-        var manifest = await _yt.videos.streamsClient.getManifest(video.id);
-        var audioStream = manifest.audioOnly.withHighestBitrate();
-        await _audioPlayer.setUrl(audioStream.url.toString());
-        await _audioPlayer.play();
-        setState(() {
-          _isLoading = false;
-        });
-      } catch (_) {}
+      print("Gabim gjatë luajtjes: $e");
     }
   }
 
