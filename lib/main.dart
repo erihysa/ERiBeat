@@ -8,7 +8,8 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart' as yt;
-import 'package:youtube_player_flutter/youtube_player_flutter.dart';
+import 'package:youtube_player_flutter/youtube_player_flutter.dart'
+    hide PlayerState;
 
 late ERIAudioHandler audioHandler;
 
@@ -21,7 +22,7 @@ Future<void> main() async {
       androidNotificationChannelId: 'com.eribeat.audio',
       androidNotificationChannelName: 'ERIBeat Music',
       androidNotificationOngoing: true,
-      androidStopForegroundOnPause: false,
+      androidStopForegroundOnPause: true,
     ),
   ) as ERIAudioHandler;
 
