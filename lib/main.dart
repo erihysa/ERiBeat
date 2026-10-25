@@ -40,7 +40,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
   Video? _currentVideo;
   int _currentIndex = -1;
   
-  Duration _videoDuration = Duration.zero; // Kohëzgjatja totale e sigurt
+  Duration _videoDuration = Duration.zero; 
   bool _isPlaying = false;
   bool _isLoading = false;
   bool _isShuffleEnabled = false;
@@ -58,17 +58,27 @@ class _MusicHomePageState extends State<MusicHomePage> {
   @override
   void initState() {
     super.initState();
+    
     // Dëgjojmë gjendjen e audios në kohë reale
     _audioPlayer.playerStateStream.listen((state) {
       setState(() {
         _isPlaying = state.playing;
       });
+
       // Kur kënga mbaron, kalo te tjetra automatikisht
       if (state.processingState == ProcessingState.completed) {
         if (!_isRepeatEnabled) {
           _playNext();
         }
       }
+    });
+
+    // Trajtimi i gabimeve të transmetimit (që të mos ngecë në 0 nëse lidhja vonon)
+    _audioPlayer.playbackEventStream.listen((event) {}, onError: (Object e, StackTrace stackTrace) {
+      setState(() {
+        _isLoading = false;
+        _isPlaying = false;
+      });
     });
   }
 
@@ -95,14 +105,16 @@ class _MusicHomePageState extends State<MusicHomePage> {
       _isLoading = true;
       _currentVideo = video;
       _currentIndex = index;
-      _videoDuration = video.duration ?? Duration.zero; // Merr kohën direkt nga meta-të e YouTube
+      _videoDuration = video.duration ?? Duration.zero; 
     });
 
     try {
+      // Marrim manifestin e audios nga YouTube
       var manifest = await _yt.videos.streamsClient.getManifest(video.id);
       var audioStream = manifest.audioOnly.withHighestBitrate();
       var streamUrl = audioStream.url.toString();
 
+      // Vendosim URL-së dhe e luajmë
       await _audioPlayer.setUrl(streamUrl);
       await _audioPlayer.play();
 
@@ -113,6 +125,16 @@ class _MusicHomePageState extends State<MusicHomePage> {
       setState(() {
         _isLoading = false;
       });
+      // Në rast se dështon për shkak të linkut të skaduar, provojmë edhe një herë
+      try {
+        var manifest = await _yt.videos.streamsClient.getManifest(video.id);
+        var audioStream = manifest.audioOnly.withHighestBitrate();
+        await _audioPlayer.setUrl(audioStream.url.toString());
+        await _audioPlayer.play();
+        setState(() {
+          _isLoading = false;
+        });
+      } catch (_) {}
     }
   }
 
@@ -251,7 +273,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
                     stream: _audioPlayer.positionStream,
                     builder: (context, snapshotPos) {
                       final position = snapshotPos.data ?? Duration.zero;
-                      final duration = _videoDuration; // Përdor kohëzgjatjen e saktë nga YouTube
+                      final duration = _videoDuration; 
                       
                       double maxDur = duration.inMilliseconds.toDouble();
                       double currentPos = position.inMilliseconds.toDouble();
