@@ -199,22 +199,34 @@ class _MusicHomePageState extends State<MusicHomePage> {
             Center(
               child: Column(
                 children: [
-                  const Icon(Icons.music_note, size: 60, color: Colors.green),
+                  const Icon(
+                    Icons.music_note,
+                    size: 60,
+                    color: Colors.green,
+                  ),
                   const SizedBox(height: 16),
                   Text(
                     'Duke luajtur tani:',
-                    style: TextStyle(color: Colors.grey[400], fontSize: 14),
+                    style: TextStyle(
+                      color: Colors.grey[400],
+                      fontSize: 14,
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Text(
                     _songTitle,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-          ),
-        ],
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
-  ),
-);
+    );
   }
-            }
+}
