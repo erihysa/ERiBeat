@@ -40,6 +40,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
   Video? _currentVideo;
   int _currentIndex = -1;
   
+  Duration _videoDuration = Duration.zero; // Kohëzgjatja totale e sigurt
   bool _isPlaying = false;
   bool _isLoading = false;
   bool _isShuffleEnabled = false;
@@ -53,6 +54,23 @@ class _MusicHomePageState extends State<MusicHomePage> {
     "Chill & Relax",
     "Albanian Music"
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    // Dëgjojmë gjendjen e audios në kohë reale
+    _audioPlayer.playerStateStream.listen((state) {
+      setState(() {
+        _isPlaying = state.playing;
+      });
+      // Kur kënga mbaron, kalo te tjetra automatikisht
+      if (state.processingState == ProcessingState.completed) {
+        if (!_isRepeatEnabled) {
+          _playNext();
+        }
+      }
+    });
+  }
 
   Future<void> _searchSongs(String query) async {
     setState(() {
@@ -77,6 +95,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
       _isLoading = true;
       _currentVideo = video;
       _currentIndex = index;
+      _videoDuration = video.duration ?? Duration.zero; // Merr kohën direkt nga meta-të e YouTube
     });
 
     try {
@@ -88,7 +107,6 @@ class _MusicHomePageState extends State<MusicHomePage> {
       await _audioPlayer.play();
 
       setState(() {
-        _isPlaying = true;
         _isLoading = false;
       });
     } catch (e) {
@@ -191,7 +209,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
             ),
             const SizedBox(height: 20),
             
-            // Paneli i Këngës Aktuale me Imazh (Thumbnail)
+            // Paneli i Këngës Aktuale
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -200,7 +218,6 @@ class _MusicHomePageState extends State<MusicHomePage> {
               ),
               child: Column(
                 children: [
-                  // Shfaq foton e këngës nëse ekziston, përndryshe ikonën
                   ClipRRect(
                     borderRadius: BorderRadius.circular(10),
                     child: _currentVideo != null
@@ -228,42 +245,46 @@ class _MusicHomePageState extends State<MusicHomePage> {
                     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 10),
-                  StreamBuilder<Duration?>(
+                  
+                  // Menaxhimi i kohës dhe sekondave
+                  StreamBuilder<Duration>(
                     stream: _audioPlayer.positionStream,
                     builder: (context, snapshotPos) {
                       final position = snapshotPos.data ?? Duration.zero;
-                      return StreamBuilder<Duration?>(
-                        stream: _audioPlayer.durationStream,
-                        builder: (context, snapshotDur) {
-                          final duration = snapshotDur.data ?? Duration.zero;
-                          return Column(
-                            children: [
-                              Slider(
-                                activeColor: Colors.green,
-                                inactiveColor: Colors.grey[700],
-                                min: 0.0,
-                                max: duration.inMilliseconds.toDouble() > 0 ? duration.inMilliseconds.toDouble() : 1.0,
-                                value: position.inMilliseconds.toDouble().clamp(0.0, duration.inMilliseconds.toDouble() > 0 ? duration.inMilliseconds.toDouble() : 1.0),
-                                onChanged: (value) {
-                                  _audioPlayer.seek(Duration(milliseconds: value.toInt()));
-                                },
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                  children: [
-                                    Text(_formatDuration(position), style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                                    Text(_formatDuration(duration), style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          );
-                        },
+                      final duration = _videoDuration; // Përdor kohëzgjatjen e saktë nga YouTube
+                      
+                      double maxDur = duration.inMilliseconds.toDouble();
+                      double currentPos = position.inMilliseconds.toDouble();
+                      if (maxDur <= 0) maxDur = 1.0;
+                      if (currentPos > maxDur) currentPos = maxDur;
+
+                      return Column(
+                        children: [
+                          Slider(
+                            activeColor: Colors.green,
+                            inactiveColor: Colors.grey[700],
+                            min: 0.0,
+                            max: maxDur,
+                            value: currentPos,
+                            onChanged: (value) {
+                              _audioPlayer.seek(Duration(milliseconds: value.toInt()));
+                            },
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Text(_formatDuration(position), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                                Text(_formatDuration(duration), style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                              ],
+                            ),
+                          ),
+                        ],
                       );
                     },
                   ),
+                  
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -282,11 +303,9 @@ class _MusicHomePageState extends State<MusicHomePage> {
                         onPressed: () {
                           if (_isPlaying) {
                             _audioPlayer.pause();
-                            setState(() => _isPlaying = false);
                           } else {
                             if (_currentVideo != null) {
                               _audioPlayer.play();
-                              setState(() => _isPlaying = true);
                             }
                           }
                         },
@@ -324,7 +343,6 @@ class _MusicHomePageState extends State<MusicHomePage> {
                       return Card(
                         color: isSelected ? Colors.grey[800] : Colors.grey[900],
                         child: ListTile(
-                          // Shfaq foton e vogël edhe te lista e kërkimit
                           leading: ClipRRect(
                             borderRadius: BorderRadius.circular(6),
                             child: Image.network(
