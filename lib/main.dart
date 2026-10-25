@@ -210,3 +210,11 @@ class _MusicHomePageState extends State<MusicHomePage> {
                     _songTitle,
                     textAlign: TextAlign.center,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    ),
+  ),
+);
+  }
+            }
