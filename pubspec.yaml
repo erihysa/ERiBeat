@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   youtube_explode_dart: ^2.2.3
   just_audio: ^0.9.36
+audio_service: ^0.18.19
+audio_session: ^0.1.25
 
 dev_dependencies:
   flutter_test:
