@@ -20,10 +20,7 @@ class MyApp extends StatelessWidget {
       title: 'ERIBeat Music',
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF121212),
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.green,
-          brightness: Brightness.dark,
-        ),
+        primaryColor: Colors.green,
       ),
       home: const MusicHomePage(),
     );
@@ -42,10 +39,17 @@ class _MusicHomePageState extends State<MusicHomePage> {
   final YoutubeExplode _yt = YoutubeExplode();
   final AudioPlayer _player = AudioPlayer();
 
+  StreamSubscription<PlayerState>? _playerStateSubscription;
+  StreamSubscription<Duration?>? _durationSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+
   List<Video> _results = [];
   Video? _currentVideo;
 
   int _currentIndex = -1;
+
+  Duration _duration = Duration.zero;
+  Duration _position = Duration.zero;
 
   bool _isLoading = false;
   bool _isSearching = false;
@@ -55,13 +59,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
 
   String? _errorMessage;
 
-  Duration _duration = Duration.zero;
-  Duration _position = Duration.zero;
-
-  StreamSubscription<PlayerState>? _playerStateSubscription;
-  StreamSubscription<Duration?>? _durationSubscription;
-  StreamSubscription<Duration>? _positionSubscription;
-  StreamSubscription<Object>? _errorSubscription;
+  bool get _isPlaying => _player.playing;
 
   final List<String> _categories = [
     'Pop Music',
@@ -103,17 +101,11 @@ class _MusicHomePageState extends State<MusicHomePage> {
         _position = position;
       });
     });
-
-    _errorSubscription = _player.errorStream.listen((error) {
-      _showError('Gabim audio: ${error.message}');
-    });
   }
 
-  bool get _isPlaying => _player.playing;
-
   Future<void> _searchSongs(String query) async {
-    final text = query.trim();
-    if (text.isEmpty) return;
+    final searchQuery = query.trim();
+    if (searchQuery.isEmpty) return;
 
     FocusScope.of(context).unfocus();
 
@@ -125,7 +117,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
 
     try {
       final videos = await _yt.search
-          .search(text)
+          .search(searchQuery)
           .timeout(const Duration(seconds: 25));
 
       if (!mounted) return;
@@ -136,17 +128,20 @@ class _MusicHomePageState extends State<MusicHomePage> {
       });
 
       if (_results.isEmpty) {
-        _showError('Nuk u gjet asnjë rezultat.');
+        _showError('Nuk u gjet asnjë këngë.');
       }
     } catch (e) {
+      debugPrint('Search error: $e');
+
       if (!mounted) return;
 
       setState(() {
         _isSearching = false;
       });
 
-      _showError('Kërkimi dështoi. Kontrollo internetin dhe provo përsëri.');
-      debugPrint('ERIBeat search error: $e');
+      _showError(
+        'Kërkimi dështoi. Kontrollo internetin dhe provo përsëri.',
+      );
     }
   }
 
@@ -163,28 +158,32 @@ class _MusicHomePageState extends State<MusicHomePage> {
     });
 
     try {
-      await _player.stop();
-
-      // Merr lidhjen audio nga YouTube.
       final manifest = await _yt.videos.streamsClient
           .getManifest(video.id)
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 25));
 
-      final audio = manifest.audioOnly.withHighestBitrate();
+      final audioStreams = manifest.audioOnly;
+
+      if (audioStreams.isEmpty) {
+        throw Exception('Nuk u gjet audio për këtë video.');
+      }
+
+      final audio = audioStreams.withHighestBitrate();
       final url = audio.url.toString();
 
-      // Vendos burimin audio.
+      await _player.stop();
+
       await _player
           .setUrl(url)
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 25));
 
       if (!mounted || _isDisposed) return;
 
       setState(() {
         _isLoading = false;
+        _duration = _player.duration ?? video.duration ?? Duration.zero;
       });
 
-      // Nis riprodhimin.
       await _player.play();
     } catch (e) {
       debugPrint('ERIBeat playback error: $e');
@@ -194,7 +193,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
       setState(() {
         _isLoading = false;
         _errorMessage =
-            'Nuk mund të luhet kjo këngë. Provo një tjetër.';
+            'Nuk u hap kënga. Provo një tjetër ose kontrollo internetin.';
       });
     }
   }
@@ -205,10 +204,8 @@ class _MusicHomePageState extends State<MusicHomePage> {
     try {
       if (_player.playing) {
         await _player.pause();
-        return;
-      }
-
-      if (_currentVideo != null && _player.audioSource != null) {
+      } else if (_currentVideo != null &&
+          _player.audioSource != null) {
         await _player.play();
       } else if (_results.isNotEmpty) {
         final index = _currentIndex >= 0 ? _currentIndex : 0;
@@ -217,16 +214,13 @@ class _MusicHomePageState extends State<MusicHomePage> {
         _showError('Kërko një këngë dhe zgjidhe nga lista.');
       }
     } catch (e) {
+      debugPrint('Playback control error: $e');
       _showError('Nuk mund të niset muzika.');
-      debugPrint('ERIBeat play/pause error: $e');
     }
   }
 
   Future<void> _playNext() async {
-    if (_results.isEmpty) {
-      _showError('Kërko këngë për të vazhduar.');
-      return;
-    }
+    if (_results.isEmpty || _isDisposed) return;
 
     int nextIndex;
 
@@ -268,12 +262,14 @@ class _MusicHomePageState extends State<MusicHomePage> {
   }
 
   Future<void> _toggleRepeat() async {
+    final newRepeat = !_isRepeat;
+
     setState(() {
-      _isRepeat = !_isRepeat;
+      _isRepeat = newRepeat;
     });
 
     await _player.setLoopMode(
-      _isRepeat ? LoopMode.one : LoopMode.off,
+      newRepeat ? LoopMode.one : LoopMode.off,
     );
   }
 
@@ -295,7 +291,13 @@ class _MusicHomePageState extends State<MusicHomePage> {
     final minutes = duration.inMinutes.remainder(60);
     final seconds = duration.inSeconds.remainder(60);
 
-    return '${minutes.toString().padLeft(2, '0')}:'
+    if (duration.inHours > 0) {
+      return '${duration.inHours.toString().padLeft(2, '0')}:'
+          '${minutes.toString().padLeft(2, '0')}:'
+          '${seconds.toString().padLeft(2, '0')}';
+    }
+
+    return '${duration.inMinutes.toString().padLeft(2, '0')}:'
         '${seconds.toString().padLeft(2, '0')}';
   }
 
@@ -306,7 +308,6 @@ class _MusicHomePageState extends State<MusicHomePage> {
     _playerStateSubscription?.cancel();
     _durationSubscription?.cancel();
     _positionSubscription?.cancel();
-    _errorSubscription?.cancel();
 
     _controller.dispose();
     _yt.close();
@@ -367,16 +368,18 @@ class _MusicHomePageState extends State<MusicHomePage> {
               ),
             ),
             const SizedBox(height: 12),
-            ElevatedButton.icon(
-              onPressed: _isSearching
-                  ? null
-                  : () => _searchSongs(_controller.text),
-              icon: const Icon(Icons.search),
-              label: const Text('Kërko në Katalog'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.green[700],
-                foregroundColor: Colors.white,
-                minimumSize: const Size.fromHeight(48),
+            SizedBox(
+              height: 48,
+              child: ElevatedButton.icon(
+                onPressed: _isSearching
+                    ? null
+                    : () => _searchSongs(_controller.text),
+                icon: const Icon(Icons.search),
+                label: const Text('Kërko në Katalog'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green[700],
+                  foregroundColor: Colors.white,
+                ),
               ),
             ),
             const SizedBox(height: 22),
@@ -409,7 +412,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
             ),
             const SizedBox(height: 22),
 
-            // PLAYER
+            // Player
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -427,7 +430,8 @@ class _MusicHomePageState extends State<MusicHomePage> {
                             height: 190,
                             width: double.infinity,
                             fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => _coverPlaceholder(),
+                            errorBuilder: (_, __, ___) =>
+                                _coverPlaceholder(),
                           )
                         : _coverPlaceholder(),
                   ),
@@ -451,13 +455,12 @@ class _MusicHomePageState extends State<MusicHomePage> {
                     style: const TextStyle(color: Colors.grey),
                   ),
                   const SizedBox(height: 12),
-
                   Slider(
                     min: 0,
                     max: maxPosition,
                     value: sliderPosition,
                     activeColor: Colors.green,
-                    inactiveColor: Colors.grey[700],
+                    inactiveColor: Colors.grey,
                     onChanged: _duration.inMilliseconds > 0
                         ? _seek
                         : null,
@@ -479,15 +482,12 @@ class _MusicHomePageState extends State<MusicHomePage> {
                     ),
                   ),
                   const SizedBox(height: 8),
-
                   if (_isLoading)
                     const Padding(
                       padding: EdgeInsets.all(8),
                       child: Column(
                         children: [
-                          CircularProgressIndicator(
-                            color: Colors.green,
-                          ),
+                          CircularProgressIndicator(color: Colors.green),
                           SizedBox(height: 8),
                           Text(
                             'Duke ngarkuar audion...',
@@ -496,19 +496,15 @@ class _MusicHomePageState extends State<MusicHomePage> {
                         ],
                       ),
                     ),
-
                   if (_errorMessage != null)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8),
                       child: Text(
                         _errorMessage!,
                         textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.redAccent,
-                        ),
+                        style: const TextStyle(color: Colors.redAccent),
                       ),
                     ),
-
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
@@ -525,7 +521,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
                         ),
                       ),
                       IconButton(
-                        tooltip: 'Kënga e mëparshme',
+                        tooltip: 'Previous',
                         onPressed: _playPrevious,
                         icon: const Icon(Icons.skip_previous),
                       ),
@@ -550,7 +546,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
                         ),
                       ),
                       IconButton(
-                        tooltip: 'Kënga tjetër',
+                        tooltip: 'Next',
                         onPressed: _playNext,
                         icon: const Icon(Icons.skip_next, size: 30),
                       ),
@@ -582,9 +578,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
               const Center(
                 child: Padding(
                   padding: EdgeInsets.all(20),
-                  child: CircularProgressIndicator(
-                    color: Colors.green,
-                  ),
+                  child: CircularProgressIndicator(color: Colors.green),
                 ),
               )
             else if (_results.isEmpty)
@@ -603,7 +597,7 @@ class _MusicHomePageState extends State<MusicHomePage> {
 
                 return Card(
                   color: selected
-                      ? Colors.green.withValues(alpha: 0.15)
+                      ? Colors.green.withOpacity(0.15)
                       : Colors.grey[900],
                   child: ListTile(
                     leading: ClipRRect(
@@ -613,8 +607,10 @@ class _MusicHomePageState extends State<MusicHomePage> {
                         width: 55,
                         height: 55,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) =>
-                            const Icon(Icons.music_note, color: Colors.green),
+                        errorBuilder: (_, __, ___) => const Icon(
+                          Icons.music_note,
+                          color: Colors.green,
+                        ),
                       ),
                     ),
                     title: Text(
