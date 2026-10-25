@@ -1,12 +1,13 @@
+
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
-import 'package:flutter/material.dart';
 import 'package:audio_service/audio_service.dart';
+import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart'
-    as yt;
+import 'package:youtube_explode_dart/youtube_explode_dart.dart' as yt;
 import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 
 late ERIAudioHandler audioHandler;
@@ -20,6 +21,7 @@ Future<void> main() async {
       androidNotificationChannelId: 'com.eribeat.audio',
       androidNotificationChannelName: 'ERIBeat Music',
       androidNotificationOngoing: true,
+      androidStopForegroundOnPause: false,
     ),
   ) as ERIAudioHandler;
 
@@ -48,8 +50,8 @@ class Song {
 
   factory Song.fromJson(Map<String, dynamic> json) => Song(
         id: json['id'] as String,
-        title: json['title'] as String,
-        artist: json['artist'] as String? ?? 'Unknown artist',
+        title: json['title'] as String? ?? 'Pa titull',
+        artist: json['artist'] as String? ?? 'Artist i panjohur',
         isMp3: json['isMp3'] as bool? ?? false,
       );
 
@@ -60,10 +62,17 @@ class Song {
       );
 }
 
-// Dedicated background audio handler for authorized MP3 URLs.
 class ERIAudioHandler extends BaseAudioHandler
     with QueueHandler, SeekHandler {
   final AudioPlayer player = AudioPlayer();
+  final Random _random = Random();
+
+  List<Song> _songs = [];
+  int _index = 0;
+
+  bool shuffleEnabled = false;
+  bool repeatEnabled = false;
+  bool _changingTrack = false;
 
   ERIAudioHandler() {
     player.playbackEventStream.listen((event) {
@@ -89,7 +98,7 @@ class ERIAudioHandler extends BaseAudioHandler
           updatePosition: player.position,
           bufferedPosition: player.bufferedPosition,
           speed: player.speed,
-          queueIndex: event.currentIndex,
+          queueIndex: _index,
         ),
       );
     });
@@ -102,6 +111,17 @@ class ERIAudioHandler extends BaseAudioHandler
           errorMessage: error.message,
         ),
       );
+    });
+
+    player.processingStateStream.listen((state) {
+      if (state == ProcessingState.completed && !_changingTrack) {
+        if (repeatEnabled) {
+          player.seek(Duration.zero);
+          player.play();
+        } else if (_songs.length > 1) {
+          skipToNext();
+        }
+      }
     });
   }
 
@@ -120,28 +140,61 @@ class ERIAudioHandler extends BaseAudioHandler
     }
   }
 
-  Future<void> playSong(Song song) async {
-    if (!song.isMp3) return;
+  MediaItem _mediaItem(Song song) => MediaItem(
+        id: song.id,
+        title: song.title,
+        artist: song.artist,
+        album: 'ERIBeat',
+      );
 
-    final uri = Uri.tryParse(song.id);
-    if (uri == null ||
-        uri.scheme != 'https' ||
-        uri.host.isEmpty) {
-      throw ArgumentError('Use a valid HTTPS MP3 URL.');
-    }
+  Future<void> playQueue(
+    List<Song> songs, {
+    int startIndex = 0,
+  }) async {
+    final audioSongs = songs.where((s) => s.isMp3).toList();
+    if (audioSongs.isEmpty) return;
 
-    final item = MediaItem(
-      id: song.id,
-      title: song.title,
-      artist: song.artist,
-    );
+    _songs = audioSongs;
+    _index = startIndex.clamp(0, _songs.length - 1);
 
-    mediaItem.add(item);
-    queue.add([item]);
-
-    await player.setUrl(song.id);
-    await player.play();
+    queue.add(_songs.map(_mediaItem).toList());
+    await _loadCurrentSong();
   }
+
+  Future<void> _loadCurrentSong() async {
+    if (_songs.isEmpty) return;
+
+    _changingTrack = true;
+    try {
+      final song = _songs[_index];
+      final uri = Uri.tryParse(song.id);
+
+      if (uri == null ||
+          uri.scheme != 'https' ||
+          uri.host.isEmpty) {
+        throw ArgumentError(
+          'Vendos një URL HTTPS të vlefshme për audion.',
+        );
+      }
+
+      mediaItem.add(_mediaItem(song));
+      await player.setUrl(song.id);
+      await player.play();
+    } finally {
+      _changingTrack = false;
+    }
+  }
+
+  Future<void> toggleShuffle() async {
+    shuffleEnabled = !shuffleEnabled;
+  }
+
+  Future<void> toggleRepeat() async {
+    repeatEnabled = !repeatEnabled;
+  }
+
+  Future<void> changeSpeed(double speed) =>
+      player.setSpeed(speed);
 
   @override
   Future<void> play() => player.play();
@@ -154,29 +207,67 @@ class ERIAudioHandler extends BaseAudioHandler
       player.seek(position);
 
   @override
-  Future<void> stop() async {
-    await player.stop();
-    mediaItem.add(null);
-    queue.add([]);
-    playbackState.add(
-      playbackState.value.copyWith(
-        playing: false,
-        processingState: AudioProcessingState.idle,
-        updatePosition: Duration.zero,
-      ),
+  Future<void> seekForward(bool begin) async {
+    if (!begin) return;
+    final next = player.position + const Duration(seconds: 15);
+    final duration = player.duration;
+
+    await player.seek(
+      duration != null && next > duration ? duration : next,
+    );
+  }
+
+  @override
+  Future<void> seekBackward(bool begin) async {
+    if (!begin) return;
+
+    final next = player.position - const Duration(seconds: 15);
+    await player.seek(
+      next < Duration.zero ? Duration.zero : next,
     );
   }
 
   @override
   Future<void> skipToNext() async {
-    // Queue navigation can be added when multiple MP3 tracks
-    // are loaded into the audio handler.
+    if (_songs.length < 2) return;
+
+    if (shuffleEnabled) {
+      var next = _index;
+      while (next == _index) {
+        next = _random.nextInt(_songs.length);
+      }
+      _index = next;
+    } else {
+      _index = (_index + 1) % _songs.length;
+    }
+
+    await _loadCurrentSong();
   }
 
   @override
   Future<void> skipToPrevious() async {
-    // Queue navigation can be added when multiple MP3 tracks
-    // are loaded into the audio handler.
+    if (player.position > const Duration(seconds: 3)) {
+      await player.seek(Duration.zero);
+      return;
+    }
+
+    if (_songs.length < 2) {
+      await player.seek(Duration.zero);
+      return;
+    }
+
+    _index = (_index - 1 + _songs.length) % _songs.length;
+    await _loadCurrentSong();
+  }
+
+  @override
+  Future<void> stop() async {
+    await player.stop();
+    mediaItem.add(null);
+    queue.add([]);
+    _songs = [];
+    _index = 0;
+    await super.stop();
   }
 }
 
@@ -189,10 +280,14 @@ class ERIBeatApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'ERIBeat',
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0D120D),
+        scaffoldBackgroundColor: const Color(0xFF0B0D18),
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF9DD69A),
+          seedColor: const Color(0xFF16D9F5),
           brightness: Brightness.dark,
+        ),
+        appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFF101329),
+          foregroundColor: Colors.white,
         ),
       ),
       home: const MusicHome(),
@@ -216,8 +311,14 @@ class _MusicHomeState extends State<MusicHome> {
 
   List<Song> _results = [];
   List<Song> _favorites = [];
+  List<Song> _activeQueue = [];
+  int _activeIndex = 0;
+
   Map<String, List<Song>> _playlists = {
-    'Playlist 1': <Song>[],
+    'Rock': <Song>[],
+    'Dance': <Song>[],
+    'Pop': <Song>[],
+    'Hip-Hop': <Song>[],
   };
 
   bool _loading = false;
@@ -232,11 +333,14 @@ class _MusicHomeState extends State<MusicHome> {
 
   Future<List<Song>> _decodeSongs(String? raw) async {
     if (raw == null) return [];
+
     try {
       return (jsonDecode(raw) as List)
-          .map((item) => Song.fromJson(
-                Map<String, dynamic>.from(item as Map),
-              ))
+          .map(
+            (item) => Song.fromJson(
+              Map<String, dynamic>.from(item as Map),
+            ),
+          )
           .toList();
     } catch (_) {
       return [];
@@ -252,29 +356,35 @@ class _MusicHomeState extends State<MusicHome> {
 
     try {
       final raw = prefs.getString('playlists');
+
       if (raw != null) {
         final decoded =
             Map<String, dynamic>.from(jsonDecode(raw) as Map);
 
         for (final entry in decoded.entries) {
           playlists[entry.key] = (entry.value as List)
-              .map((item) => Song.fromJson(
-                    Map<String, dynamic>.from(item as Map),
-                  ))
+              .map(
+                (item) => Song.fromJson(
+                  Map<String, dynamic>.from(item as Map),
+                ),
+              )
               .toList();
         }
       }
     } catch (_) {}
 
-    if (playlists.isEmpty) {
-      playlists['Playlist 1'] = [];
+    for (final name in ['Rock', 'Dance', 'Pop', 'Hip-Hop']) {
+      playlists.putIfAbsent(name, () => <Song>[]);
     }
 
     if (!mounted) return;
+
     setState(() {
       _favorites = favorites;
       _playlists = playlists;
     });
+
+    await _saveSaved();
   }
 
   Future<void> _saveSaved() async {
@@ -309,35 +419,47 @@ class _MusicHomeState extends State<MusicHome> {
 
     try {
       final videos = await _youtube.search.search(query);
-      final songs = videos.take(25).map(Song.fromVideo).toList();
+      final songs = videos.take(30).map(Song.fromVideo).toList();
 
-      if (!mounted) return;
-      setState(() => _results = songs);
+      if (mounted) setState(() => _results = songs);
     } catch (_) {
       if (mounted) {
-        setState(() => _error = 'Gabim gjatë kërkimit. Kontrollo internetin.');
+        setState(() {
+          _error = 'Gabim gjatë kërkimit. Kontrollo internetin.';
+        });
       }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _playSong(Song song) async {
+  Future<void> _playSong(
+    Song song, {
+    List<Song>? queueSongs,
+  }) async {
+    final list = List<Song>.from(queueSongs ?? [song]);
+    final index = list.indexWhere((s) => s.id == song.id);
+
+    _activeQueue = list;
+    _activeIndex = index < 0 ? 0 : index;
+
     try {
       if (song.isMp3) {
-        // Stop the video before starting background audio.
         _videoController?.pause();
-        await audioHandler.playSong(song);
 
-        if (!mounted) return;
-        setState(() {
-          _currentSong = song;
-          _error = '';
-        });
+        final mp3Queue = list.where((s) => s.isMp3).toList();
+        final mp3Index =
+            mp3Queue.indexWhere((s) => s.id == song.id);
+
+        await audioHandler.playQueue(
+          mp3Queue,
+          startIndex: mp3Index < 0 ? 0 : mp3Index,
+        );
       } else {
         await audioHandler.stop();
 
         final old = _videoController;
+
         _videoController = YoutubePlayerController(
           initialVideoId: song.id,
           flags: const YoutubePlayerFlags(
@@ -348,20 +470,55 @@ class _MusicHomeState extends State<MusicHome> {
         );
 
         old?.dispose();
-
-        if (!mounted) return;
-        setState(() {
-          _currentSong = song;
-          _error = '';
-        });
       }
-    } catch (e) {
+
+      if (!mounted) return;
+
+      setState(() {
+        _currentSong = song;
+        _error = '';
+      });
+    } catch (_) {
       if (mounted) {
         setState(() {
-          _error = 'Nuk u luajt. Kontrollo URL-në ose provo një këngë tjetër.';
+          _error = 'Nuk u luajt audio. Kontrollo URL-në dhe lidhjen.';
         });
       }
     }
+  }
+
+  Future<void> _nextSong() async {
+    if (_currentSong?.isMp3 == true) {
+      await audioHandler.skipToNext();
+      return;
+    }
+
+    if (_activeQueue.length < 2) return;
+
+    _activeIndex = (_activeIndex + 1) % _activeQueue.length;
+
+    await _playSong(
+      _activeQueue[_activeIndex],
+      queueSongs: _activeQueue,
+    );
+  }
+
+  Future<void> _previousSong() async {
+    if (_currentSong?.isMp3 == true) {
+      await audioHandler.skipToPrevious();
+      return;
+    }
+
+    if (_activeQueue.length < 2) return;
+
+    _activeIndex =
+        (_activeIndex - 1 + _activeQueue.length) %
+            _activeQueue.length;
+
+    await _playSong(
+      _activeQueue[_activeIndex],
+      queueSongs: _activeQueue,
+    );
   }
 
   bool _isFavorite(Song song) =>
@@ -375,6 +532,7 @@ class _MusicHomeState extends State<MusicHome> {
         _favorites.add(song);
       }
     });
+
     await _saveSaved();
   }
 
@@ -385,23 +543,25 @@ class _MusicHomeState extends State<MusicHome> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Ruaj në playlist'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ..._playlists.keys.map(
-              (name) => ListTile(
-                title: Text(name),
-                leading: const Icon(Icons.queue_music),
-                onTap: () => Navigator.pop(ctx, name),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ..._playlists.keys.map(
+                (name) => ListTile(
+                  title: Text(name),
+                  leading: const Icon(Icons.queue_music),
+                  onTap: () => Navigator.pop(ctx, name),
+                ),
               ),
-            ),
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Emër i playlistës së re',
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Emër playlist-e të re',
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
         actions: [
           TextButton(
@@ -422,12 +582,12 @@ class _MusicHomeState extends State<MusicHome> {
     );
 
     nameController.dispose();
+
     if (choice == null || !mounted) return;
 
     setState(() {
-      final name = choice.startsWith('NEW:')
-          ? choice.substring(4)
-          : choice;
+      final name =
+          choice.startsWith('NEW:') ? choice.substring(4) : choice;
 
       _playlists.putIfAbsent(name, () => <Song>[]);
 
@@ -454,17 +614,21 @@ class _MusicHomeState extends State<MusicHome> {
             children: [
               TextField(
                 controller: titleController,
-                decoration: const InputDecoration(labelText: 'Titulli'),
+                decoration: const InputDecoration(
+                  labelText: 'Titulli',
+                ),
               ),
               TextField(
                 controller: artistController,
-                decoration: const InputDecoration(labelText: 'Artisti'),
+                decoration: const InputDecoration(
+                  labelText: 'Artisti',
+                ),
               ),
               TextField(
                 controller: urlController,
                 keyboardType: TextInputType.url,
                 decoration: const InputDecoration(
-                  labelText: 'URL HTTPS e MP3 të autorizuar',
+                  labelText: 'URL HTTPS e audios së autorizuar',
                   hintText: 'https://example.com/song.mp3',
                 ),
               ),
@@ -528,16 +692,21 @@ class _MusicHomeState extends State<MusicHome> {
     setState(() {
       _playlists[playlist]?.removeWhere((s) => s.id == song.id);
     });
+
     await _saveSaved();
   }
 
-  Widget _songTile(Song song, {String? playlistName}) {
+  Widget _songTile(
+    Song song, {
+    String? playlistName,
+    List<Song>? queueSongs,
+  }) {
     final favorite = _isFavorite(song);
 
     return ListTile(
       leading: Icon(
         song.isMp3 ? Icons.audiotrack : Icons.music_note,
-        color: const Color(0xFF66E6B0),
+        color: const Color(0xFF16D9F5),
       ),
       title: Text(
         song.title,
@@ -549,6 +718,7 @@ class _MusicHomeState extends State<MusicHome> {
         spacing: 0,
         children: [
           IconButton(
+            tooltip: 'Të preferuarat',
             icon: Icon(
               favorite ? Icons.favorite : Icons.favorite_border,
               color: favorite ? Colors.pinkAccent : null,
@@ -563,73 +733,93 @@ class _MusicHomeState extends State<MusicHome> {
           else
             IconButton(
               icon: const Icon(Icons.delete_outline),
-              onPressed: () => _removeFromPlaylist(playlistName, song),
+              onPressed: () =>
+                  _removeFromPlaylist(playlistName, song),
             ),
           IconButton(
             icon: const Icon(Icons.play_circle_fill, size: 32),
-            onPressed: () => _playSong(song),
+            onPressed: () => _playSong(
+              song,
+              queueSongs: queueSongs ?? [song],
+            ),
           ),
         ],
       ),
-      onTap: () => _playSong(song),
+      onTap: () => _playSong(
+        song,
+        queueSongs: queueSongs ?? [song],
+      ),
     );
   }
 
-  Widget _searchPage() {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: TextField(
-            controller: _search,
-            textInputAction: TextInputAction.search,
-            onSubmitted: (_) => _searchSongs(),
-            decoration: InputDecoration(
-              hintText: 'Kërko këngë në YouTube...',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.arrow_forward),
-                onPressed: _searchSongs,
-              ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ),
-        ),
-        Wrap(
-          spacing: 8,
-          children: [
-            FilledButton.tonalIcon(
-              onPressed: _addMp3Url,
-              icon: const Icon(Icons.add_link),
-              label: const Text('Shto MP3'),
-            ),
-          ],
-        ),
-        if (_loading) const LinearProgressIndicator(),
-        if (_error.isNotEmpty)
+  Widget _searchPage() => Column(
+        children: [
           Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(
-              _error,
-              style: const TextStyle(color: Colors.orangeAccent),
+            padding: const EdgeInsets.all(12),
+            child: TextField(
+              controller: _search,
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _searchSongs(),
+              decoration: InputDecoration(
+                hintText: 'Kërko këngë në YouTube...',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.arrow_forward),
+                  onPressed: _searchSongs,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
             ),
           ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: _results.length,
-            itemBuilder: (ctx, i) => _songTile(_results[i]),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: _addMp3Url,
+                  icon: const Icon(Icons.add_link),
+                  label: const Text('Shto MP3'),
+                ),
+              ],
+            ),
           ),
-        ),
-      ],
-    );
-  }
+          if (_loading) const LinearProgressIndicator(),
+          if (_error.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Text(
+                _error,
+                style: const TextStyle(color: Colors.orangeAccent),
+              ),
+            ),
+          Expanded(
+            child: ListView.builder(
+              itemCount: _results.length,
+              itemBuilder: (ctx, i) => _songTile(
+                _results[i],
+                queueSongs: _results,
+              ),
+            ),
+          ),
+        ],
+      );
 
   Widget _favoritesPage() => _favorites.isEmpty
-      ? const Center(child: Text('Nuk ke këngë të preferuara.'))
+      ? const Center(
+          child: Text('Nuk ke këngë të preferuara.'),
+        )
       : ListView(
-          children: _favorites.map((s) => _songTile(s)).toList(),
+          children: _favorites
+              .map(
+                (s) => _songTile(
+                  s,
+                  queueSongs: _favorites,
+                ),
+              )
+              .toList(),
         );
 
   Widget _playlistsPage() => ListView(
@@ -639,12 +829,179 @@ class _MusicHomeState extends State<MusicHome> {
             title: Text(entry.key),
             subtitle: Text('${entry.value.length} këngë'),
             children: entry.value.isEmpty
-                ? [const ListTile(title: Text('Playlist bosh'))]
+                ? [
+                    const ListTile(
+                      title: Text(
+                        'Playlist bosh — shto këngë nga Kërko',
+                      ),
+                    ),
+                  ]
                 : entry.value
-                    .map((s) => _songTile(s, playlistName: entry.key))
+                    .map(
+                      (s) => _songTile(
+                        s,
+                        playlistName: entry.key,
+                        queueSongs: entry.value,
+                      ),
+                    )
                     .toList(),
           );
         }).toList(),
+      );
+
+  String _time(Duration d) {
+    final minutes =
+        d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds =
+        d.inSeconds.remainder(60).toString().padLeft(2, '0');
+
+    return '${d.inHours > 0 ? '${d.inHours}:' : ''}$minutes:$seconds';
+  }
+
+  Widget _audioControls() => Container(
+        padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+        color: const Color(0xFF15182D),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            StreamBuilder<Duration?>(
+              stream: audioHandler.player.durationStream,
+              builder: (context, durationSnap) {
+                final duration = durationSnap.data ?? Duration.zero;
+
+                return StreamBuilder<Duration>(
+                  stream: audioHandler.player.positionStream,
+                  builder: (context, positionSnap) {
+                    final position =
+                        positionSnap.data ?? Duration.zero;
+                    final maxMs = max(1, duration.inMilliseconds);
+                    final value = position.inMilliseconds
+                        .clamp(0, maxMs)
+                        .toDouble();
+
+                    return Column(
+                      children: [
+                        Slider(
+                          min: 0,
+                          max: maxMs.toDouble(),
+                          value: value,
+                          onChanged: (v) => audioHandler.seek(
+                            Duration(milliseconds: v.round()),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                          ),
+                          child: Row(
+                            mainAxisAlignment:
+                                MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                _time(position),
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              Text(
+                                _time(duration),
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                IconButton(
+                  tooltip: 'Shuffle',
+                  color: audioHandler.shuffleEnabled
+                      ? const Color(0xFF16D9F5)
+                      : null,
+                  onPressed: () async {
+                    await audioHandler.toggleShuffle();
+                    if (mounted) setState(() {});
+                  },
+                  icon: const Icon(Icons.shuffle),
+                ),
+                IconButton(
+                  tooltip: 'Previous',
+                  onPressed: _previousSong,
+                  icon: const Icon(Icons.skip_previous, size: 32),
+                ),
+                StreamBuilder<PlayerState>(
+                  stream: audioHandler.player.playerStateStream,
+                  builder: (context, snapshot) {
+                    final playing =
+                        snapshot.data?.playing ?? false;
+
+                    return IconButton(
+                      iconSize: 46,
+                      onPressed: () => playing
+                          ? audioHandler.pause()
+                          : audioHandler.play(),
+                      icon: Icon(
+                        playing
+                            ? Icons.pause_circle_filled
+                            : Icons.play_circle_fill,
+                      ),
+                    );
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Next',
+                  onPressed: _nextSong,
+                  icon: const Icon(Icons.skip_next, size: 32),
+                ),
+                IconButton(
+                  tooltip: 'Repeat',
+                  color: audioHandler.repeatEnabled
+                      ? const Color(0xFF16D9F5)
+                      : null,
+                  onPressed: () async {
+                    await audioHandler.toggleRepeat();
+                    if (mounted) setState(() {});
+                  },
+                  icon: const Icon(Icons.repeat),
+                ),
+                PopupMenuButton<double>(
+                  tooltip: 'Shpejtësia',
+                  onSelected: audioHandler.changeSpeed,
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(
+                      value: 0.75,
+                      child: Text('0.75×'),
+                    ),
+                    PopupMenuItem(
+                      value: 1.0,
+                      child: Text('1× Normal'),
+                    ),
+                    PopupMenuItem(
+                      value: 1.25,
+                      child: Text('1.25×'),
+                    ),
+                    PopupMenuItem(
+                      value: 1.5,
+                      child: Text('1.5×'),
+                    ),
+                    PopupMenuItem(
+                      value: 2.0,
+                      child: Text('2×'),
+                    ),
+                  ],
+                  child: const Padding(
+                    padding: EdgeInsets.all(8),
+                    child: Text('1×'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       );
 
   @override
@@ -665,10 +1022,24 @@ class _MusicHomeState extends State<MusicHome> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          '♫ ERIBeat',
-          style: TextStyle(fontWeight: FontWeight.bold),
+        title: const Row(
+          children: [
+            Icon(Icons.graphic_eq, color: Color(0xFF16D9F5)),
+            SizedBox(width: 8),
+            Text(
+              'ERIBeat',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
         ),
+        actions: [
+          if (_currentSong?.isMp3 == true)
+            IconButton(
+              tooltip: 'Ndalo audio',
+              onPressed: audioHandler.stop,
+              icon: const Icon(Icons.stop),
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -677,7 +1048,7 @@ class _MusicHomeState extends State<MusicHome> {
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(10),
-              color: const Color(0xFF1C241C),
+              color: const Color(0xFF15182D),
               child: Text(
                 '${_currentSong!.title} • ${_currentSong!.artist}',
                 maxLines: 1,
@@ -685,48 +1056,39 @@ class _MusicHomeState extends State<MusicHome> {
                 textAlign: TextAlign.center,
               ),
             ),
-            if (!_currentSong!.isMp3 && _videoController != null)
+            if (!_currentSong!.isMp3 &&
+                _videoController != null) ...[
               YoutubePlayer(
                 controller: _videoController!,
                 showVideoProgressIndicator: true,
               ),
-            if (_currentSong!.isMp3)
-              Container(
-                color: const Color(0xFF1C241C),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.stop),
-                      onPressed: audioHandler.stop,
-                    ),
-                    StreamBuilder<PlaybackState>(
-                      stream: audioHandler.playbackState,
-                      builder: (context, snapshot) {
-                        final playing =
-                            snapshot.data?.playing ?? false;
-                        return IconButton(
-                          iconSize: 42,
-                          icon: Icon(
-                            playing
-                                ? Icons.pause_circle
-                                : Icons.play_circle,
-                          ),
-                          onPressed: playing
-                              ? audioHandler.pause
-                              : audioHandler.play,
-                        );
-                      },
-                    ),
-                  ],
-                ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  IconButton(
+                    onPressed: _previousSong,
+                    icon: const Icon(Icons.skip_previous),
+                  ),
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8),
+                    child: Text('Kontrollet e videos në YouTube'),
+                  ),
+                  IconButton(
+                    onPressed: _nextSong,
+                    icon: const Icon(Icons.skip_next),
+                  ),
+                ],
               ),
+            ],
+            if (_currentSong!.isMp3) _audioControls(),
           ],
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
-        onDestinationSelected: (index) => setState(() => _tab = index),
+        onDestinationSelected: (index) {
+          setState(() => _tab = index);
+        },
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.search),
