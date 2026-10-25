@@ -28,7 +28,7 @@ jobs:
           channel: stable
 
       - name: Generate Android project files
-        run: flutter create --platforms=android --project-name my_music_app .
+        run: flutter create --platforms=android --project-name my_music_app --org com.eribeat .
 
       - name: Install Dependencies
         run: flutter pub get
