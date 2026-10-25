@@ -1,30 +1,58 @@
 import 'dart:async';
-import 'dart:math';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:audio_service/audio_service.dart';
+import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+import 'package:just_audio_background/just_audio_background.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const MyApp());
+  await JustAudioBackground.init(
+    androidNotificationChannelId: 'com.eribeat.audio',
+    androidNotificationChannelName: 'ERIBeat music',
+    androidNotificationOngoing: true,
+  );
+  runApp(const ERiBeatApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class ERiBeatApp extends StatelessWidget {
+  const ERiBeatApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      title: 'ERIBeat',
       debugShowCheckedModeBanner: false,
-      title: 'ERIBeat Music',
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
-        primaryColor: Colors.green,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF20D997),
+          brightness: Brightness.dark,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF101412),
+        useMaterial3: true,
       ),
       home: const MusicHomePage(),
     );
   }
+}
+
+class AudioTrack {
+  const AudioTrack({
+    required this.title,
+    required this.artist,
+    required this.audioUrl,
+    required this.pageUrl,
+    required this.license,
+  });
+
+  final String title;
+  final String artist;
+  final String audioUrl;
+  final String pageUrl;
+  final String license;
 }
 
 class MusicHomePage extends StatefulWidget {
@@ -35,631 +63,500 @@ class MusicHomePage extends StatefulWidget {
 }
 
 class _MusicHomePageState extends State<MusicHomePage> {
-  final TextEditingController _controller = TextEditingController();
-  final YoutubeExplode _yt = YoutubeExplode();
   final AudioPlayer _player = AudioPlayer();
+  final TextEditingController _searchController = TextEditingController();
+  final List<AudioTrack> _tracks = [];
+  StreamSubscription<int?>? _indexSubscription;
 
-  StreamSubscription<PlayerState>? _playerStateSubscription;
-  StreamSubscription<Duration?>? _durationSubscription;
-  StreamSubscription<Duration>? _positionSubscription;
-
-  List<Video> _results = [];
-  Video? _currentVideo;
-
-  int _currentIndex = -1;
-
-  Duration _duration = Duration.zero;
-  Duration _position = Duration.zero;
-
-  bool _isLoading = false;
+  AudioTrack? _currentTrack;
+  String _status = 'Po kërkoj muzikë me licencë të hapur…';
   bool _isSearching = false;
-  bool _isShuffle = false;
-  bool _isRepeat = false;
-  bool _isDisposed = false;
-
-  String? _errorMessage;
-
-  bool get _isPlaying => _player.playing;
-
-  final List<String> _categories = [
-    'Pop Music',
-    'Rock Hits',
-    'Hip Hop Rap',
-    'Electronic EDM',
-    'Chill Music',
-    'Albanian Music',
-  ];
+  bool _isShuffling = false;
+  LoopMode _loopMode = LoopMode.off;
+  Duration _position = Duration.zero;
+  Duration _duration = Duration.zero;
 
   @override
   void initState() {
     super.initState();
-
-    _playerStateSubscription =
-        _player.playerStateStream.listen((state) {
-      if (!mounted) return;
-
-      setState(() {});
-
-      if (state.processingState == ProcessingState.completed &&
-          !_isRepeat) {
-        _playNext();
+    _player.positionStream.listen((value) {
+      if (mounted) setState(() => _position = value);
+    });
+    _player.durationStream.listen((value) {
+      if (mounted) setState(() => _duration = value ?? Duration.zero);
+    });
+    _indexSubscription = _player.currentIndexStream.listen((index) {
+      if (index != null && index >= 0 && index < _tracks.length && mounted) {
+        setState(() => _currentTrack = _tracks[index]);
       }
     });
-
-    _durationSubscription = _player.durationStream.listen((duration) {
-      if (!mounted) return;
-
-      setState(() {
-        _duration = duration ?? Duration.zero;
-      });
-    });
-
-    _positionSubscription = _player.positionStream.listen((position) {
-      if (!mounted) return;
-
-      setState(() {
-        _position = position;
-      });
-    });
-  }
-
-  Future<void> _searchSongs(String query) async {
-    final searchQuery = query.trim();
-    if (searchQuery.isEmpty) return;
-
-    FocusScope.of(context).unfocus();
-
-    setState(() {
-      _isSearching = true;
-      _errorMessage = null;
-      _results = [];
-    });
-
-    try {
-      final videos = await _yt.search
-          .search(searchQuery)
-          .timeout(const Duration(seconds: 25));
-
-      if (!mounted) return;
-
-      setState(() {
-        _results = videos.toList();
-        _isSearching = false;
-      });
-
-      if (_results.isEmpty) {
-        _showError('Nuk u gjet asnjë këngë.');
-      }
-    } catch (e) {
-      debugPrint('Search error: $e');
-
-      if (!mounted) return;
-
-      setState(() {
-        _isSearching = false;
-      });
-
-      _showError(
-        'Kërkimi dështoi. Kontrollo internetin dhe provo përsëri.',
-      );
-    }
-  }
-
-  Future<void> _playSong(Video video, int index) async {
-    if (_isDisposed) return;
-
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-      _currentVideo = video;
-      _currentIndex = index;
-      _duration = video.duration ?? Duration.zero;
-      _position = Duration.zero;
-    });
-
-    try {
-      final manifest = await _yt.videos.streamsClient
-          .getManifest(video.id)
-          .timeout(const Duration(seconds: 25));
-
-      final audioStreams = manifest.audioOnly;
-
-      if (audioStreams.isEmpty) {
-        throw Exception('Nuk u gjet audio për këtë video.');
-      }
-
-      final audio = audioStreams.withHighestBitrate();
-      final url = audio.url.toString();
-
-      await _player.stop();
-
-      await _player
-          .setUrl(url)
-          .timeout(const Duration(seconds: 25));
-
-      if (!mounted || _isDisposed) return;
-
-      setState(() {
-        _isLoading = false;
-        _duration = _player.duration ?? video.duration ?? Duration.zero;
-      });
-
-      await _player.play();
-    } catch (e) {
-      debugPrint('ERIBeat playback error: $e');
-
-      if (!mounted) return;
-
-      setState(() {
-        _isLoading = false;
-        _errorMessage =
-            'Nuk u hap kënga. Provo një tjetër ose kontrollo internetin.';
-      });
-    }
-  }
-
-  Future<void> _togglePlayback() async {
-    if (_isLoading) return;
-
-    try {
-      if (_player.playing) {
-        await _player.pause();
-      } else if (_currentVideo != null &&
-          _player.audioSource != null) {
-        await _player.play();
-      } else if (_results.isNotEmpty) {
-        final index = _currentIndex >= 0 ? _currentIndex : 0;
-        await _playSong(_results[index], index);
-      } else {
-        _showError('Kërko një këngë dhe zgjidhe nga lista.');
-      }
-    } catch (e) {
-      debugPrint('Playback control error: $e');
-      _showError('Nuk mund të niset muzika.');
-    }
-  }
-
-  Future<void> _playNext() async {
-    if (_results.isEmpty || _isDisposed) return;
-
-    int nextIndex;
-
-    if (_isShuffle && _results.length > 1) {
-      do {
-        nextIndex = Random().nextInt(_results.length);
-      } while (nextIndex == _currentIndex);
-    } else {
-      nextIndex = (_currentIndex + 1) % _results.length;
-    }
-
-    await _playSong(_results[nextIndex], nextIndex);
-  }
-
-  Future<void> _playPrevious() async {
-    if (_results.isEmpty) return;
-
-    if (_position.inSeconds > 3) {
-      await _player.seek(Duration.zero);
-      return;
-    }
-
-    final previousIndex = _currentIndex <= 0
-        ? _results.length - 1
-        : _currentIndex - 1;
-
-    await _playSong(_results[previousIndex], previousIndex);
-  }
-
-  Future<void> _stopSong() async {
-    await _player.stop();
-
-    if (!mounted) return;
-
-    setState(() {
-      _position = Duration.zero;
-      _isLoading = false;
-    });
-  }
-
-  Future<void> _toggleRepeat() async {
-    final newRepeat = !_isRepeat;
-
-    setState(() {
-      _isRepeat = newRepeat;
-    });
-
-    await _player.setLoopMode(
-      newRepeat ? LoopMode.one : LoopMode.off,
-    );
-  }
-
-  Future<void> _seek(double value) async {
-    await _player.seek(
-      Duration(milliseconds: value.round()),
-    );
-  }
-
-  void _showError(String message) {
-    if (!mounted) return;
-
-    setState(() {
-      _errorMessage = message;
-    });
-  }
-
-  String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes.remainder(60);
-    final seconds = duration.inSeconds.remainder(60);
-
-    if (duration.inHours > 0) {
-      return '${duration.inHours.toString().padLeft(2, '0')}:'
-          '${minutes.toString().padLeft(2, '0')}:'
-          '${seconds.toString().padLeft(2, '0')}';
-    }
-
-    return '${duration.inMinutes.toString().padLeft(2, '0')}:'
-        '${seconds.toString().padLeft(2, '0')}';
+    _searchController.text = 'music';
+    _search('music');
   }
 
   @override
   void dispose() {
-    _isDisposed = true;
-
-    _playerStateSubscription?.cancel();
-    _durationSubscription?.cancel();
-    _positionSubscription?.cancel();
-
-    _controller.dispose();
-    _yt.close();
+    _indexSubscription?.cancel();
+    _searchController.dispose();
     _player.dispose();
-
     super.dispose();
+  }
+
+  String _plainText(dynamic value, {String fallback = ''}) {
+    if (value == null) return fallback;
+    return value.toString()
+        .replaceAll(RegExp(r'<[^>]*>'), ' ')
+        .replaceAll('&amp;', '&')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&#039;', "'")
+        .replaceAll('&nbsp;', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  bool _supportedAudio(String url) {
+    final path = Uri.tryParse(url)?.path.toLowerCase() ?? '';
+    return const ['.mp3', '.ogg', '.oga', '.opus', '.wav', '.flac', '.m4a']
+        .any(path.endsWith);
+  }
+
+  Future<void> _search(String query) async {
+    final cleanQuery = query.trim();
+    if (cleanQuery.isEmpty) {
+      setState(() => _status = 'Shkruaj emrin e këngës ose artistit.');
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+      _status = 'Duke kërkuar audio të licencuar…';
+      _tracks.clear();
+    });
+
+    try {
+      final uri = Uri.https('commons.wikimedia.org', '/w/api.php', {
+        'action': 'query',
+        'generator': 'search',
+        'gsrsearch': 'filetype:audio $cleanQuery',
+        'gsrnamespace': '6',
+        'gsrlimit': '30',
+        'prop': 'imageinfo',
+        'iiprop': 'url|extmetadata',
+        'format': 'json',
+        'origin': '*',
+      });
+
+      final response = await http.get(uri, headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'ERIBeatMusicPlayer/1.0 (Flutter app)',
+      }).timeout(const Duration(seconds: 20));
+
+      if (response.statusCode != 200) {
+        throw Exception('Kërkimi nuk u përgjigj (${response.statusCode}).');
+      }
+
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes))
+          as Map<String, dynamic>;
+      final queryData = decoded['query'] as Map<String, dynamic>?;
+      final pages = queryData?['pages'] as Map<String, dynamic>?;
+
+      final found = <AudioTrack>[];
+      if (pages != null) {
+        for (final pageValue in pages.values) {
+          final page = pageValue as Map<String, dynamic>;
+          final title = _plainText(page['title'], fallback: 'Audio file');
+          final infos = page['imageinfo'] as List<dynamic>?;
+          if (infos == null || infos.isEmpty) continue;
+
+          final info = infos.first as Map<String, dynamic>;
+          final audioUrl = (info['url'] ?? '').toString();
+          if (audioUrl.isEmpty || !_supportedAudio(audioUrl)) continue;
+
+          final metadata = info['extmetadata'] as Map<String, dynamic>? ?? {};
+          final artist = _plainText(
+            metadata['Artist']?['value'],
+            fallback: 'Artist not listed',
+          );
+          final license = _plainText(
+            metadata['LicenseShortName']?['value'],
+            fallback: 'Check license on source page',
+          );
+          final pageUrl = (metadata['PageURL']?['value'] ??
+                  'https://commons.wikimedia.org/wiki/${Uri.encodeComponent(title.replaceAll(' ', '_'))}')
+              .toString();
+
+          found.add(AudioTrack(
+            title: title.replaceFirst(RegExp(r'^File:'), ''),
+            artist: artist,
+            audioUrl: audioUrl,
+            pageUrl: pageUrl,
+            license: license,
+          ));
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _tracks.addAll(found);
+        _status = found.isEmpty
+            ? 'Nuk u gjet audio e përshtatshme. Provo një fjalë tjetër, p.sh. piano, jazz ose guitar.'
+            : 'U gjetën ${found.length} skedarë audio. Kontrollo licencën dhe atribuimin te burimi.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _status =
+          'Nuk u krye kërkimi. Kontrollo internetin dhe provo përsëri.');
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
+    }
+  }
+
+  Future<void> _playTrack(int index) async {
+    if (index < 0 || index >= _tracks.length) return;
+    final track = _tracks[index];
+    try {
+      setState(() {
+        _currentTrack = track;
+        _status = 'Duke hapur: ${track.title}';
+        _position = Duration.zero;
+      });
+
+      final sources = _tracks.map((item) {
+        return AudioSource.uri(
+          Uri.parse(item.audioUrl),
+          tag: MediaItem(
+            id: item.audioUrl,
+            title: item.title,
+            artist: item.artist,
+            album: 'Wikimedia Commons • ${item.license}',
+          ),
+        );
+      }).toList();
+
+      await _player.setAudioSource(
+        ConcatenatingAudioSource(children: sources),
+        initialIndex: index,
+      );
+      await _player.play();
+      if (mounted) setState(() => _status = 'Po luhet');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _status =
+          'Ky skedar nuk u hap. Provo një tjetër; disa formate mund të mos mbështeten.');
+    }
+  }
+
+  Future<void> _togglePlay() async {
+    if (_player.playing) {
+      await _player.pause();
+    } else if (_player.audioSource != null) {
+      await _player.play();
+    } else if (_tracks.isNotEmpty) {
+      await _playTrack(0);
+    } else {
+      await _search(_searchController.text);
+    }
+  }
+
+  Future<void> _toggleShuffle() async {
+    final next = !_isShuffling;
+    await _player.setShuffleModeEnabled(next);
+    if (mounted) setState(() => _isShuffling = next);
+  }
+
+  Future<void> _toggleRepeat() async {
+    final next = _loopMode == LoopMode.off
+        ? LoopMode.all
+        : _loopMode == LoopMode.all
+            ? LoopMode.one
+            : LoopMode.off;
+    await _player.setLoopMode(next);
+    if (mounted) setState(() => _loopMode = next);
+  }
+
+  String _time(Duration duration) {
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final hours = duration.inHours;
+    return hours > 0
+        ? '${hours.toString().padLeft(2, '0')}:$minutes:$seconds'
+        : '$minutes:$seconds';
   }
 
   @override
   Widget build(BuildContext context) {
-    final maxPosition = _duration.inMilliseconds > 0
+    final maxMs = _duration.inMilliseconds > 0
         ? _duration.inMilliseconds.toDouble()
         : 1.0;
-
-    final sliderPosition = _position.inMilliseconds
-        .toDouble()
-        .clamp(0.0, maxPosition);
+    final posMs = _position.inMilliseconds.clamp(0, maxMs.toInt()).toDouble();
 
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Colors.black,
         title: const Row(
           children: [
-            Icon(Icons.graphic_eq, color: Colors.green),
+            Icon(Icons.graphic_eq, color: Color(0xFF20D997)),
             SizedBox(width: 8),
-            Text(
-              'ERIBeat',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            SizedBox(width: 6),
-            Text(
-              'Music',
-              style: TextStyle(color: Colors.green),
-            ),
+            Text('ERIBeat', style: TextStyle(fontWeight: FontWeight.bold)),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Kërko muzikë',
+            onPressed: _isSearching ? null : () => _search(_searchController.text),
+            icon: const Icon(Icons.search),
+          ),
+        ],
       ),
       body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+        child: Column(
           children: [
-            TextField(
-              controller: _controller,
-              textInputAction: TextInputAction.search,
-              onSubmitted: _searchSongs,
-              decoration: InputDecoration(
-                hintText: 'Kërko këngë ose artist...',
-                prefixIcon: const Icon(
-                  Icons.search,
-                  color: Colors.green,
-                ),
-                filled: true,
-                fillColor: Colors.grey[900],
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 48,
-              child: ElevatedButton.icon(
-                onPressed: _isSearching
-                    ? null
-                    : () => _searchSongs(_controller.text),
-                icon: const Icon(Icons.search),
-                label: const Text('Kërko në Katalog'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green[700],
-                  foregroundColor: Colors.white,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: TextField(
+                controller: _searchController,
+                textInputAction: TextInputAction.search,
+                onSubmitted: _search,
+                decoration: InputDecoration(
+                  hintText: 'Kërko muzikë, artist ose instrument…',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: IconButton(
+                    onPressed: _isSearching
+                        ? null
+                        : () => _search(_searchController.text),
+                    icon: const Icon(Icons.arrow_forward),
+                  ),
+                  filled: true,
+                  fillColor: const Color(0xFF1B231F),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(18),
+                    borderSide: BorderSide.none,
+                  ),
                 ),
               ),
             ),
-            const SizedBox(height: 22),
-            const Text(
-              'Zhanret & Sugjerimet',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.bold,
+            if (_isSearching) const LinearProgressIndicator(minHeight: 2),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text('Audio me licencë të hapur',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                  Text('${_tracks.length} rezultate',
+                      style: TextStyle(color: Colors.white.withOpacity(0.6))),
+                ],
               ),
             ),
-            const SizedBox(height: 10),
-            SizedBox(
-              height: 42,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: _categories.map((category) {
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ActionChip(
-                      backgroundColor: Colors.grey[850],
-                      label: Text(category),
-                      onPressed: () {
-                        _controller.text = category;
-                        _searchSongs(category);
+            Expanded(
+              child: _tracks.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(28),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.library_music,
+                                size: 64, color: Color(0xFF20D997)),
+                            const SizedBox(height: 16),
+                            Text(_status, textAlign: TextAlign.center),
+                            const SizedBox(height: 12),
+                            OutlinedButton.icon(
+                              onPressed: _isSearching
+                                  ? null
+                                  : () => _search(_searchController.text),
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Provo përsëri'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: _tracks.length,
+                      separatorBuilder: (_, __) => Divider(
+                        height: 1,
+                        color: Colors.white.withOpacity(0.06),
+                      ),
+                      itemBuilder: (context, index) {
+                        final track = _tracks[index];
+                        final isCurrent = _currentTrack?.audioUrl == track.audioUrl;
+                        return ListTile(
+                          leading: Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1D352B),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              isCurrent ? Icons.equalizer : Icons.music_note,
+                              color: const Color(0xFF20D997),
+                            ),
+                          ),
+                          title: Text(track.title,
+                              maxLines: 2, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                            '${track.artist}\n${track.license}',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          isThreeLine: true,
+                          trailing: IconButton(
+                            tooltip: 'Luaj',
+                            onPressed: () => _playTrack(index),
+                            icon: Icon(
+                              isCurrent && _player.playing
+                                  ? Icons.graphic_eq
+                                  : Icons.play_circle_fill,
+                              color: const Color(0xFF20D997),
+                              size: 30,
+                            ),
+                          ),
+                          onTap: () => _playTrack(index),
+                        );
                       },
                     ),
-                  );
-                }).toList(),
-              ),
             ),
-            const SizedBox(height: 22),
-
-            // Player
             Container(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
               decoration: BoxDecoration(
-                color: Colors.grey[900],
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Colors.grey.shade800),
+                color: const Color(0xFF19201C),
+                border: Border(
+                  top: BorderSide(color: Colors.white.withOpacity(0.08)),
+                ),
               ),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: _currentVideo != null
-                        ? Image.network(
-                            _currentVideo!.thumbnails.highResUrl,
-                            height: 190,
-                            width: double.infinity,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                                _coverPlaceholder(),
-                          )
-                        : _coverPlaceholder(),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    _currentVideo?.title ??
-                        'Zgjidh një këngë nga lista',
-                    textAlign: TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    _currentVideo?.author ?? 'ERIBeat Music Player',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: Colors.grey),
-                  ),
-                  const SizedBox(height: 12),
-                  Slider(
-                    min: 0,
-                    max: maxPosition,
-                    value: sliderPosition,
-                    activeColor: Colors.green,
-                    inactiveColor: Colors.grey,
-                    onChanged: _duration.inMilliseconds > 0
-                        ? _seek
-                        : null,
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          _formatDuration(_position),
-                          style: const TextStyle(color: Colors.grey),
-                        ),
-                        Text(
-                          _formatDuration(_duration),
-                          style: const TextStyle(color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  if (_isLoading)
-                    const Padding(
-                      padding: EdgeInsets.all(8),
-                      child: Column(
-                        children: [
-                          CircularProgressIndicator(color: Colors.green),
-                          SizedBox(height: 8),
-                          Text(
-                            'Duke ngarkuar audion...',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                  if (_errorMessage != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Text(
-                        _errorMessage!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.redAccent),
-                      ),
-                    ),
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      IconButton(
-                        tooltip: 'Shuffle',
-                        onPressed: () {
-                          setState(() {
-                            _isShuffle = !_isShuffle;
-                          });
-                        },
-                        icon: Icon(
-                          Icons.shuffle,
-                          color: _isShuffle ? Colors.green : Colors.grey,
+                      Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF234333),
+                          borderRadius: BorderRadius.circular(12),
                         ),
+                        child: const Icon(Icons.music_note,
+                            color: Color(0xFF20D997), size: 28),
                       ),
-                      IconButton(
-                        tooltip: 'Previous',
-                        onPressed: _playPrevious,
-                        icon: const Icon(Icons.skip_previous),
-                      ),
-                      IconButton(
-                        tooltip: 'Stop',
-                        onPressed: _stopSong,
-                        icon: const Icon(
-                          Icons.stop_circle_outlined,
-                          color: Colors.redAccent,
-                          size: 30,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: _isPlaying ? 'Pause' : 'Play',
-                        onPressed: _togglePlayback,
-                        iconSize: 48,
-                        color: Colors.green,
-                        icon: Icon(
-                          _isPlaying
-                              ? Icons.pause_circle_filled
-                              : Icons.play_circle_filled,
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Next',
-                        onPressed: _playNext,
-                        icon: const Icon(Icons.skip_next, size: 30),
-                      ),
-                      IconButton(
-                        tooltip: 'Repeat',
-                        onPressed: _toggleRepeat,
-                        icon: Icon(
-                          Icons.repeat,
-                          color: _isRepeat ? Colors.green : Colors.grey,
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _currentTrack?.title ?? 'Zgjidh një këngë',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              _currentTrack?.artist ?? _status,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  color: Colors.white.withOpacity(0.6),
+                                  fontSize: 12),
+                            ),
+                          ],
                         ),
                       ),
                     ],
                   ),
+                  Slider(
+                    value: posMs,
+                    max: maxMs,
+                    onChanged: _duration == Duration.zero
+                        ? null
+                        : (value) => _player.seek(
+                              Duration(milliseconds: value.round()),
+                            ),
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_time(_position),
+                          style: const TextStyle(fontSize: 11)),
+                      Text(_time(_duration),
+                          style: const TextStyle(fontSize: 11)),
+                    ],
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      IconButton(
+                        tooltip: 'Përziej',
+                        onPressed: _toggleShuffle,
+                        color: _isShuffling
+                            ? const Color(0xFF20D997)
+                            : Colors.white70,
+                        icon: const Icon(Icons.shuffle),
+                      ),
+                      IconButton(
+                        tooltip: 'Kënga e mëparshme',
+                        onPressed: () async {
+                          if (_player.hasPrevious) await _player.seekToPrevious();
+                        },
+                        icon: const Icon(Icons.skip_previous, size: 34),
+                      ),
+                      StreamBuilder<PlayerState>(
+                        stream: _player.playerStateStream,
+                        builder: (context, snapshot) {
+                          final playing = snapshot.data?.playing ?? false;
+                          final loading = snapshot.data?.processingState ==
+                                  ProcessingState.loading ||
+                              snapshot.data?.processingState ==
+                                  ProcessingState.buffering;
+                          return IconButton.filled(
+                            tooltip: playing ? 'Pauzë' : 'Luaj',
+                            onPressed: _togglePlay,
+                            iconSize: 32,
+                            icon: loading
+                                ? const SizedBox(
+                                    width: 26,
+                                    height: 26,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2),
+                                  )
+                                : Icon(playing ? Icons.pause : Icons.play_arrow),
+                          );
+                        },
+                      ),
+                      IconButton(
+                        tooltip: 'Kënga tjetër',
+                        onPressed: () async {
+                          if (_player.hasNext) await _player.seekToNext();
+                        },
+                        icon: const Icon(Icons.skip_next, size: 34),
+                      ),
+                      IconButton(
+                        tooltip: 'Përsërit',
+                        onPressed: _toggleRepeat,
+                        color: _loopMode == LoopMode.off
+                            ? Colors.white70
+                            : const Color(0xFF20D997),
+                        icon: Icon(_loopMode == LoopMode.one
+                            ? Icons.repeat_one
+                            : Icons.repeat),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Burimi: Wikimedia Commons • kontrollo licencën dhe kushtet e atribuimit.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white.withOpacity(0.45),
+                      fontSize: 10,
+                    ),
+                  ),
                 ],
               ),
             ),
-
-            const SizedBox(height: 24),
-            const Text(
-              'Rezultatet / Lista e Kërkimit',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 10),
-
-            if (_isSearching)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(20),
-                  child: CircularProgressIndicator(color: Colors.green),
-                ),
-              )
-            else if (_results.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(20),
-                child: Text(
-                  'Kërko një këngë për të parë rezultatet.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.grey),
-                ),
-              )
-            else
-              ...List.generate(_results.length, (index) {
-                final video = _results[index];
-                final selected = index == _currentIndex;
-
-                return Card(
-                  color: selected
-                      ? Colors.green.withOpacity(0.15)
-                      : Colors.grey[900],
-                  child: ListTile(
-                    leading: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.network(
-                        video.thumbnails.mediumResUrl,
-                        width: 55,
-                        height: 55,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const Icon(
-                          Icons.music_note,
-                          color: Colors.green,
-                        ),
-                      ),
-                    ),
-                    title: Text(
-                      video.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: selected ? Colors.green : Colors.white,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    subtitle: Text(
-                      video.author,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    trailing: selected && _isLoading
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : Icon(
-                            selected && _isPlaying
-                                ? Icons.equalizer
-                                : Icons.play_arrow,
-                            color: Colors.green,
-                          ),
-                    onTap: () => _playSong(video, index),
-                  ),
-                );
-              }),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _coverPlaceholder() {
-    return Container(
-      height: 190,
-      width: double.infinity,
-      color: Colors.grey[850],
-      child: const Icon(
-        Icons.music_note,
-        size: 70,
-        color: Colors.green,
       ),
     );
   }
