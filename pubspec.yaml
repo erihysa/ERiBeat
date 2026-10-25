@@ -1,7 +1,7 @@
-name: my_music_app
-description: "A YouTube music app for personal use."
+name: eribeat
+description: ERIBeat music player with openly licensed audio and background playback.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -9,10 +9,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  youtube_explode_dart: ^2.2.3
+  http: ^1.2.2
   just_audio: ^0.9.36
-audio_service: ^0.18.19
-audio_session: ^0.1.25
+  audio_service: ^0.18.19
+  just_audio_background: ^0.0.1-beta.17
 
 dev_dependencies:
   flutter_test:
