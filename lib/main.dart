@@ -1,454 +1,740 @@
-
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:youtube_explode_dart/youtube_explode_dart.dart';
+import 'package:audio_service/audio_service.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:youtube_explode_dart/youtube_explode_dart.dart'
+    as yt;
+import 'package:youtube_player_flutter/youtube_player_flutter.dart';
 
-void main() {
+late ERIAudioHandler audioHandler;
+
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const ERiBeatApp());
+
+  audioHandler = await AudioService.init(
+    builder: ERIAudioHandler.new,
+    config: const AudioServiceConfig(
+      androidNotificationChannelId: 'com.eribeat.audio',
+      androidNotificationChannelName: 'ERIBeat Music',
+      androidNotificationOngoing: true,
+    ),
+  ) as ERIAudioHandler;
+
+  runApp(const ERIBeatApp());
 }
 
-class Track {
+class Song {
   final String id;
   final String title;
-  final String author;
+  final String artist;
+  final bool isMp3;
 
-  Track({
+  const Song({
     required this.id,
     required this.title,
-    required this.author,
+    required this.artist,
+    this.isMp3 = false,
   });
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'title': title,
-        'author': author,
+        'artist': artist,
+        'isMp3': isMp3,
       };
 
-  factory Track.fromJson(Map<String, dynamic> json) {
-    return Track(
-      id: json['id'] as String,
-      title: json['title'] as String,
-      author: json['author'] as String,
+  factory Song.fromJson(Map<String, dynamic> json) => Song(
+        id: json['id'] as String,
+        title: json['title'] as String,
+        artist: json['artist'] as String? ?? 'Unknown artist',
+        isMp3: json['isMp3'] as bool? ?? false,
+      );
+
+  factory Song.fromVideo(yt.Video video) => Song(
+        id: video.id.value,
+        title: video.title,
+        artist: video.author,
+      );
+}
+
+// Dedicated background audio handler for authorized MP3 URLs.
+class ERIAudioHandler extends BaseAudioHandler
+    with QueueHandler, SeekHandler {
+  final AudioPlayer player = AudioPlayer();
+
+  ERIAudioHandler() {
+    player.playbackEventStream.listen((event) {
+      playbackState.add(
+        PlaybackState(
+          controls: [
+            MediaControl.skipToPrevious,
+            if (player.playing)
+              MediaControl.pause
+            else
+              MediaControl.play,
+            MediaControl.skipToNext,
+            MediaControl.stop,
+          ],
+          androidCompactActionIndices: const [0, 1, 2],
+          systemActions: const {
+            MediaAction.seek,
+            MediaAction.seekForward,
+            MediaAction.seekBackward,
+          },
+          processingState: _mapState(player.processingState),
+          playing: player.playing,
+          updatePosition: player.position,
+          bufferedPosition: player.bufferedPosition,
+          speed: player.speed,
+          queueIndex: event.currentIndex,
+        ),
+      );
+    });
+
+    player.errorStream.listen((error) {
+      playbackState.add(
+        playbackState.value.copyWith(
+          playing: false,
+          processingState: AudioProcessingState.error,
+          errorMessage: error.message,
+        ),
+      );
+    });
+  }
+
+  AudioProcessingState _mapState(ProcessingState state) {
+    switch (state) {
+      case ProcessingState.idle:
+        return AudioProcessingState.idle;
+      case ProcessingState.loading:
+        return AudioProcessingState.loading;
+      case ProcessingState.buffering:
+        return AudioProcessingState.buffering;
+      case ProcessingState.ready:
+        return AudioProcessingState.ready;
+      case ProcessingState.completed:
+        return AudioProcessingState.completed;
+    }
+  }
+
+  Future<void> playSong(Song song) async {
+    if (!song.isMp3) return;
+
+    final uri = Uri.tryParse(song.id);
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.host.isEmpty) {
+      throw ArgumentError('Use a valid HTTPS MP3 URL.');
+    }
+
+    final item = MediaItem(
+      id: song.id,
+      title: song.title,
+      artist: song.artist,
     );
+
+    mediaItem.add(item);
+    queue.add([item]);
+
+    await player.setUrl(song.id);
+    await player.play();
+  }
+
+  @override
+  Future<void> play() => player.play();
+
+  @override
+  Future<void> pause() => player.pause();
+
+  @override
+  Future<void> seek(Duration position) =>
+      player.seek(position);
+
+  @override
+  Future<void> stop() async {
+    await player.stop();
+    mediaItem.add(null);
+    queue.add([]);
+    playbackState.add(
+      playbackState.value.copyWith(
+        playing: false,
+        processingState: AudioProcessingState.idle,
+        updatePosition: Duration.zero,
+      ),
+    );
+  }
+
+  @override
+  Future<void> skipToNext() async {
+    // Queue navigation can be added when multiple MP3 tracks
+    // are loaded into the audio handler.
+  }
+
+  @override
+  Future<void> skipToPrevious() async {
+    // Queue navigation can be added when multiple MP3 tracks
+    // are loaded into the audio handler.
   }
 }
 
-class ERiBeatApp extends StatelessWidget {
-  const ERiBeatApp({super.key});
+class ERIBeatApp extends StatelessWidget {
+  const ERIBeatApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ERIBeat',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.green,
-        useMaterial3: true,
+      title: 'ERIBeat',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF0D120D),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF9DD69A),
+          brightness: Brightness.dark,
+        ),
       ),
-      home: const MusicPage(),
+      home: const MusicHome(),
     );
   }
 }
 
-class MusicPage extends StatefulWidget {
-  const MusicPage({super.key});
+class MusicHome extends StatefulWidget {
+  const MusicHome({super.key});
 
   @override
-  State<MusicPage> createState() => _MusicPageState();
+  State<MusicHome> createState() => _MusicHomeState();
 }
 
-class _MusicPageState extends State<MusicPage> {
-  final YoutubeExplode yt = YoutubeExplode();
-  final AudioPlayer player = AudioPlayer();
-  final TextEditingController searchController =
-      TextEditingController();
+class _MusicHomeState extends State<MusicHome> {
+  final yt.YoutubeExplode _youtube = yt.YoutubeExplode();
+  final TextEditingController _search = TextEditingController();
 
-  List<Video> results = [];
-  List<Track> playlist = [];
+  YoutubePlayerController? _videoController;
+  Song? _currentSong;
 
-  bool searching = false;
-  bool loadingTrack = false;
-  int tab = 0;
+  List<Song> _results = [];
+  List<Song> _favorites = [];
+  Map<String, List<Song>> _playlists = {
+    'Playlist 1': <Song>[],
+  };
 
-  String status = 'Kërko këngën tënde';
-  String currentTitle = 'ERIBeat';
+  bool _loading = false;
+  String _error = '';
+  int _tab = 0;
 
   @override
   void initState() {
     super.initState();
-    loadPlaylist();
+    _loadSaved();
   }
 
-  Future<void> loadPlaylist() async {
-    final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString('eribeat_playlist');
+  Future<List<Song>> _decodeSongs(String? raw) async {
+    if (raw == null) return [];
+    try {
+      return (jsonDecode(raw) as List)
+          .map((item) => Song.fromJson(
+                Map<String, dynamic>.from(item as Map),
+              ))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
 
-    if (stored != null) {
-      try {
-        final List<dynamic> decoded = jsonDecode(stored);
+  Future<void> _loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final favorites =
+        await _decodeSongs(prefs.getString('favorites'));
+
+    final Map<String, List<Song>> playlists = {};
+
+    try {
+      final raw = prefs.getString('playlists');
+      if (raw != null) {
+        final decoded =
+            Map<String, dynamic>.from(jsonDecode(raw) as Map);
+
+        for (final entry in decoded.entries) {
+          playlists[entry.key] = (entry.value as List)
+              .map((item) => Song.fromJson(
+                    Map<String, dynamic>.from(item as Map),
+                  ))
+              .toList();
+        }
+      }
+    } catch (_) {}
+
+    if (playlists.isEmpty) {
+      playlists['Playlist 1'] = [];
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _favorites = favorites;
+      _playlists = playlists;
+    });
+  }
+
+  Future<void> _saveSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    await prefs.setString(
+      'favorites',
+      jsonEncode(_favorites.map((s) => s.toJson()).toList()),
+    );
+
+    await prefs.setString(
+      'playlists',
+      jsonEncode(
+        _playlists.map(
+          (name, songs) => MapEntry(
+            name,
+            songs.map((s) => s.toJson()).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _searchSongs() async {
+    final query = _search.text.trim();
+    if (query.isEmpty) return;
+
+    setState(() {
+      _loading = true;
+      _error = '';
+    });
+
+    try {
+      final videos = await _youtube.search.search(query);
+      final songs = videos.take(25).map(Song.fromVideo).toList();
+
+      if (!mounted) return;
+      setState(() => _results = songs);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = 'Gabim gjatë kërkimit. Kontrollo internetin.');
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _playSong(Song song) async {
+    try {
+      if (song.isMp3) {
+        // Stop the video before starting background audio.
+        _videoController?.pause();
+        await audioHandler.playSong(song);
+
         if (!mounted) return;
         setState(() {
-          playlist = decoded
-              .map((item) => Track.fromJson(
-                  Map<String, dynamic>.from(item)))
-              .toList();
+          _currentSong = song;
+          _error = '';
         });
-      } catch (_) {
-        setState(() {
-          playlist = [];
-        });
-      }
-    }
-  }
-
-  Future<void> savePlaylist() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      'eribeat_playlist',
-      jsonEncode(playlist.map((track) => track.toJson()).toList()),
-    );
-  }
-
-  bool isSaved(Video video) {
-    return playlist.any(
-      (track) => track.id == video.id.toString(),
-    );
-  }
-
-  Future<void> toggleSave(Video video) async {
-    final id = video.id.toString();
-
-    setState(() {
-      final index = playlist.indexWhere((track) => track.id == id);
-
-      if (index >= 0) {
-        playlist.removeAt(index);
       } else {
-        playlist.add(
-          Track(
-            id: id,
-            title: video.title,
-            author: video.author,
+        await audioHandler.stop();
+
+        final old = _videoController;
+        _videoController = YoutubePlayerController(
+          initialVideoId: song.id,
+          flags: const YoutubePlayerFlags(
+            autoPlay: true,
+            mute: false,
+            enableCaption: false,
           ),
         );
-      }
-    });
 
-    await savePlaylist();
+        old?.dispose();
 
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            playlist.any((track) => track.id == id)
-                ? 'U ruajt në Playlist'
-                : 'U hoq nga Playlist',
-          ),
-          duration: const Duration(seconds: 1),
-        ),
-      );
-    }
-  }
-
-  Future<void> removeTrack(Track track) async {
-    setState(() {
-      playlist.removeWhere((item) => item.id == track.id);
-    });
-    await savePlaylist();
-  }
-
-  Future<void> searchMusic(String query) async {
-    if (query.trim().isEmpty) return;
-
-    setState(() {
-      searching = true;
-      status = 'Duke kërkuar...';
-    });
-
-    try {
-      final found = await yt.search.search(query);
-      if (!mounted) return;
-
-      setState(() {
-        results = found.take(25).toList();
-        status = results.isEmpty
-            ? 'Nuk u gjetën këngë.'
-            : 'Rezultatet: ${results.length}';
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() {
-        status = 'Gabim kërkimi. Kontrollo internetin.';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => searching = false);
-      }
-    }
-  }
-
-  Future<void> playTrack(Track track) async {
-    await playById(track.id, track.title);
-  }
-
-  Future<void> playVideo(Video video) async {
-    await playById(video.id.toString(), video.title);
-  }
-
-  Future<void> playById(String id, String title) async {
-    setState(() {
-      loadingTrack = true;
-      currentTitle = title;
-      status = 'Duke hapur këngën...';
-    });
-
-    try {
-      final manifest =
-          await yt.videos.streamsClient.getManifest(VideoId(id));
-
-      final audio = manifest.audioOnly.withHighestBitrate();
-
-      await player.setUrl(audio.url.toString());
-      await player.play();
-
-      if (mounted) {
-        setState(() => status = 'Po luhet: $title');
+        if (!mounted) return;
+        setState(() {
+          _currentSong = song;
+          _error = '';
+        });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          status = 'Nuk u luajt. Provo një këngë tjetër.';
+          _error = 'Nuk u luajt. Kontrollo URL-në ose provo një këngë tjetër.';
         });
-      }
-    } finally {
-      if (mounted) {
-        setState(() => loadingTrack = false);
       }
     }
   }
 
-  Widget searchTab() {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(16),
-          child: TextField(
-            controller: searchController,
-            textInputAction: TextInputAction.search,
-            onSubmitted: searchMusic,
-            decoration: InputDecoration(
-              hintText: 'Kërko këngë ose artist...',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.arrow_forward),
-                onPressed: () => searchMusic(searchController.text),
+  bool _isFavorite(Song song) =>
+      _favorites.any((s) => s.id == song.id);
+
+  Future<void> _toggleFavorite(Song song) async {
+    setState(() {
+      if (_isFavorite(song)) {
+        _favorites.removeWhere((s) => s.id == song.id);
+      } else {
+        _favorites.add(song);
+      }
+    });
+    await _saveSaved();
+  }
+
+  Future<void> _addToPlaylist(Song song) async {
+    final nameController = TextEditingController();
+
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ruaj në playlist'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ..._playlists.keys.map(
+              (name) => ListTile(
+                title: Text(name),
+                leading: const Icon(Icons.queue_music),
+                onTap: () => Navigator.pop(ctx, name),
               ),
-              border: const OutlineInputBorder(),
             ),
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Emër i playlistës së re',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Anulo'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              if (name.isNotEmpty) {
+                Navigator.pop(ctx, 'NEW:$name');
+              }
+            },
+            child: const Text('Krijo'),
+          ),
+        ],
+      ),
+    );
+
+    nameController.dispose();
+    if (choice == null || !mounted) return;
+
+    setState(() {
+      final name = choice.startsWith('NEW:')
+          ? choice.substring(4)
+          : choice;
+
+      _playlists.putIfAbsent(name, () => <Song>[]);
+
+      if (!_playlists[name]!.any((s) => s.id == song.id)) {
+        _playlists[name]!.add(song);
+      }
+    });
+
+    await _saveSaved();
+  }
+
+  Future<void> _addMp3Url() async {
+    final urlController = TextEditingController();
+    final titleController = TextEditingController();
+    final artistController = TextEditingController();
+
+    final song = await showDialog<Song>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Shto audio MP3'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: titleController,
+                decoration: const InputDecoration(labelText: 'Titulli'),
+              ),
+              TextField(
+                controller: artistController,
+                decoration: const InputDecoration(labelText: 'Artisti'),
+              ),
+              TextField(
+                controller: urlController,
+                keyboardType: TextInputType.url,
+                decoration: const InputDecoration(
+                  labelText: 'URL HTTPS e MP3 të autorizuar',
+                  hintText: 'https://example.com/song.mp3',
+                ),
+              ),
+            ],
           ),
         ),
-        if (searching) const LinearProgressIndicator(),
-        Padding(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text(status),
-        ),
-        Expanded(
-          child: ListView.builder(
-            itemCount: results.length,
-            itemBuilder: (context, index) {
-              final video = results[index];
-              final saved = isSaved(video);
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Anulo'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final uri = Uri.tryParse(urlController.text.trim());
 
-              return ListTile(
-                leading: const Icon(
-                  Icons.music_note,
-                  color: Colors.greenAccent,
-                ),
-                title: Text(
-                  video.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                subtitle: Text(video.author),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: saved ? 'Hiq nga Playlist' : 'Save',
-                      icon: Icon(
-                        saved ? Icons.favorite : Icons.favorite_border,
-                        color: saved ? Colors.redAccent : null,
-                      ),
-                      onPressed: () => toggleSave(video),
-                    ),
-                    IconButton(
-                      tooltip: 'Play',
-                      icon: const Icon(Icons.play_circle_fill),
-                      onPressed: () => playVideo(video),
-                    ),
-                  ],
+              if (uri == null ||
+                  uri.scheme != 'https' ||
+                  uri.host.isEmpty) {
+                return;
+              }
+
+              Navigator.pop(
+                ctx,
+                Song(
+                  id: uri.toString(),
+                  title: titleController.text.trim().isEmpty
+                      ? 'Audio MP3'
+                      : titleController.text.trim(),
+                  artist: artistController.text.trim().isEmpty
+                      ? 'Audio'
+                      : artistController.text.trim(),
+                  isMp3: true,
                 ),
               );
             },
+            child: const Text('Shto'),
+          ),
+        ],
+      ),
+    );
+
+    urlController.dispose();
+    titleController.dispose();
+    artistController.dispose();
+
+    if (song == null || !mounted) return;
+
+    setState(() {
+      if (!_results.any((s) => s.id == song.id)) {
+        _results.insert(0, song);
+      }
+    });
+
+    await _addToPlaylist(song);
+  }
+
+  Future<void> _removeFromPlaylist(
+    String playlist,
+    Song song,
+  ) async {
+    setState(() {
+      _playlists[playlist]?.removeWhere((s) => s.id == song.id);
+    });
+    await _saveSaved();
+  }
+
+  Widget _songTile(Song song, {String? playlistName}) {
+    final favorite = _isFavorite(song);
+
+    return ListTile(
+      leading: Icon(
+        song.isMp3 ? Icons.audiotrack : Icons.music_note,
+        color: const Color(0xFF66E6B0),
+      ),
+      title: Text(
+        song.title,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(song.artist),
+      trailing: Wrap(
+        spacing: 0,
+        children: [
+          IconButton(
+            icon: Icon(
+              favorite ? Icons.favorite : Icons.favorite_border,
+              color: favorite ? Colors.pinkAccent : null,
+            ),
+            onPressed: () => _toggleFavorite(song),
+          ),
+          if (playlistName == null)
+            IconButton(
+              icon: const Icon(Icons.playlist_add),
+              onPressed: () => _addToPlaylist(song),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              onPressed: () => _removeFromPlaylist(playlistName, song),
+            ),
+          IconButton(
+            icon: const Icon(Icons.play_circle_fill, size: 32),
+            onPressed: () => _playSong(song),
+          ),
+        ],
+      ),
+      onTap: () => _playSong(song),
+    );
+  }
+
+  Widget _searchPage() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            controller: _search,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (_) => _searchSongs(),
+            decoration: InputDecoration(
+              hintText: 'Kërko këngë në YouTube...',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.arrow_forward),
+                onPressed: _searchSongs,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+          ),
+        ),
+        Wrap(
+          spacing: 8,
+          children: [
+            FilledButton.tonalIcon(
+              onPressed: _addMp3Url,
+              icon: const Icon(Icons.add_link),
+              label: const Text('Shto MP3'),
+            ),
+          ],
+        ),
+        if (_loading) const LinearProgressIndicator(),
+        if (_error.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(
+              _error,
+              style: const TextStyle(color: Colors.orangeAccent),
+            ),
+          ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: _results.length,
+            itemBuilder: (ctx, i) => _songTile(_results[i]),
           ),
         ),
       ],
     );
   }
 
-  Widget playlistTab() {
-    if (playlist.isEmpty) {
-      return const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.queue_music, size: 64),
-            SizedBox(height: 12),
-            Text('Playlist është bosh'),
-            Text('Kërko një këngë dhe shtyp ♡ për ta ruajtur.'),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      itemCount: playlist.length,
-      itemBuilder: (context, index) {
-        final track = playlist[index];
-
-        return ListTile(
-          leading: const Icon(
-            Icons.music_note,
-            color: Colors.greenAccent,
-          ),
-          title: Text(
-            track.title,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          subtitle: Text(track.author),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              IconButton(
-                tooltip: 'Play',
-                icon: const Icon(Icons.play_circle_fill),
-                onPressed: () => playTrack(track),
-              ),
-              IconButton(
-                tooltip: 'Hiq nga Playlist',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () => removeTrack(track),
-              ),
-            ],
-          ),
-          onTap: () => playTrack(track),
+  Widget _favoritesPage() => _favorites.isEmpty
+      ? const Center(child: Text('Nuk ke këngë të preferuara.'))
+      : ListView(
+          children: _favorites.map((s) => _songTile(s)).toList(),
         );
-      },
-    );
-  }
+
+  Widget _playlistsPage() => ListView(
+        children: _playlists.entries.map((entry) {
+          return ExpansionTile(
+            leading: const Icon(Icons.queue_music),
+            title: Text(entry.key),
+            subtitle: Text('${entry.value.length} këngë'),
+            children: entry.value.isEmpty
+                ? [const ListTile(title: Text('Playlist bosh'))]
+                : entry.value
+                    .map((s) => _songTile(s, playlistName: entry.key))
+                    .toList(),
+          );
+        }).toList(),
+      );
 
   @override
   void dispose() {
-    searchController.dispose();
-    player.dispose();
-    yt.close();
+    _search.dispose();
+    _videoController?.dispose();
+    _youtube.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final pages = [
+      _searchPage(),
+      _favoritesPage(),
+      _playlistsPage(),
+    ];
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
-          '🎵 ERIBeat',
+          '♫ ERIBeat',
           style: TextStyle(fontWeight: FontWeight.bold),
         ),
-        actions: [
-          if (tab == 1)
-            IconButton(
-              tooltip: 'Fshi të gjithë Playlist',
-              icon: const Icon(Icons.delete_sweep),
-              onPressed: () async {
-                setState(() => playlist.clear());
-                await savePlaylist();
-              },
-            ),
-        ],
       ),
       body: Column(
         children: [
-          Expanded(
-            child: tab == 0 ? searchTab() : playlistTab(),
-          ),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(
-              vertical: 10,
-              horizontal: 16,
+          Expanded(child: pages[_tab]),
+          if (_currentSong != null) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(10),
+              color: const Color(0xFF1C241C),
+              child: Text(
+                '${_currentSong!.title} • ${_currentSong!.artist}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              ),
             ),
-            color: Theme.of(context).colorScheme.surfaceContainer,
-            child: Column(
-              children: [
-                Text(
-                  currentTitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  status,
-                  maxLines: 2,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 12),
-                ),
-                Row(
+            if (!_currentSong!.isMp3 && _videoController != null)
+              YoutubePlayer(
+                controller: _videoController!,
+                showVideoProgressIndicator: true,
+              ),
+            if (_currentSong!.isMp3)
+              Container(
+                color: const Color(0xFF1C241C),
+                child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     IconButton(
                       icon: const Icon(Icons.stop),
-                      onPressed: () => player.stop(),
+                      onPressed: audioHandler.stop,
                     ),
-                    IconButton.filled(
-                      iconSize: 34,
-                      icon: loadingTrack
-                          ? const SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                              ),
-                            )
-                          : const Icon(Icons.play_arrow),
-                      onPressed: loadingTrack
-                          ? null
-                          : () => player.play(),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.pause),
-                      onPressed: () => player.pause(),
+                    StreamBuilder<PlaybackState>(
+                      stream: audioHandler.playbackState,
+                      builder: (context, snapshot) {
+                        final playing =
+                            snapshot.data?.playing ?? false;
+                        return IconButton(
+                          iconSize: 42,
+                          icon: Icon(
+                            playing
+                                ? Icons.pause_circle
+                                : Icons.play_circle,
+                          ),
+                          onPressed: playing
+                              ? audioHandler.pause
+                              : audioHandler.play,
+                        );
+                      },
                     ),
                   ],
                 ),
-              ],
-            ),
-          ),
+              ),
+          ],
         ],
       ),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (index) {
-          setState(() => tab = index);
-        },
+        selectedIndex: _tab,
+        onDestinationSelected: (index) => setState(() => _tab = index),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.search),
             label: 'Kërko',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.favorite_border),
+            label: 'Të preferuarat',
           ),
           NavigationDestination(
             icon: Icon(Icons.queue_music),
