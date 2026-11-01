@@ -17,12 +17,6 @@ dependencies:
   shared_preferences: ^2.5.3
 dependency_overrides:
   audio_session: 0.2.3
-
-flutter:
-
-sdk: flutter
-
-just_audio: ^0.9.38
   
 dev_dependencies:
   flutter_test:
