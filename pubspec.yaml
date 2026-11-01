@@ -1,23 +1,17 @@
-name: eribeat
-description: ERIBeat music player with openly licensed audio and background playback.
+name: my_music_app
+description: "EriMusic catalog and library app"
 publish_to: 'none'
-version: 1.0.0+2
+
+version: 1.0.0+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
-
+  sdk: ^3.5.0
 
 dependencies:
   flutter:
     sdk: flutter
-  youtube_explode_dart: ^2.3.10
-  youtube_player_flutter: ^9.1.3
-  just_audio: ^0.10.6
-  audio_service: ^0.18.19
-  shared_preferences: ^2.5.3
-dependency_overrides:
-  audio_session: 0.2.3
-  
+  just_audio: ^0.9.38
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -25,4 +19,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-  
