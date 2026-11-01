@@ -316,7 +316,7 @@ class _MusicHomeState extends State<MusicHome> {
         jsonEncode(favorites.map((s) => s.toJson()).toList()));
     await p.setString('downloads',
         jsonEncode(downloads.map((s) => s.toJson()).toList()));
-    await p.setString(
+    await p.setString()
       'playlists',
       jsonEncode(playlists.map((k, v) =>
           MapEntry(k, v.map((s) => s.toJson()).toList())),
@@ -713,17 +713,6 @@ class _MusicHomeState extends State<MusicHome> {
       ),
       onTap: () => playSong(s, list: list ?? [s]),
     );
-  }
-
-  Future<void> toggleFavorite(Song s) async {
-    setState(() {
-      if (favorites.any((x) => x.id == s.id)) {
-        favorites.removeWhere((x) => x.id == s.id);
-      } else {
-        favorites.add(s);
-      }
-    });
-    await saveAll();
   }
 
   Widget searchPage() {
